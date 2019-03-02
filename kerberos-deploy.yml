@@ -1,0 +1,433 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Metadata:
+  License: Apache-2.0
+Description: 'AWS CloudFormation Template DeployKerberos:
+  This template deploys MIT Kerberos on Linux EC2 instances.
+  It Launches two Amazon Linux AMI 1 instances. One instance will be the Master KDC server,
+  while the other will be the  Replica KDC server (read only KDC server).'
+Parameters:
+  MasterServerPrivateIpAddress:
+    Description: This is the PrivateDNS name of the Master KDC server. Don't change the value.
+    Type: String
+    Default: ip-10-0-0-8.ec2.internal
+  ReplicaServerPrivateIpAddress:
+    Description: This is the PrivateDNS name of the Replica KDC server. Don't change the value.
+    Type: String
+    Default: ip-10-0-0-9.ec2.internal
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: must be the name of an existing EC2 KeyPair.
+  SourceBucket:
+    Description: This is the S3 bucket name where the "external_kdc_servers.sh" will be hosted.
+    Type: String
+    Default: kerberos-cf-templates
+  SSHLocation:
+    Description: ' The IP address range that can be used to SSH to the EC2 instances'
+    Type: String
+    MinLength: '9'
+    MaxLength: '18'
+    Default: 0.0.0.0/0
+    AllowedPattern: '(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})'
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+  InstanceType:
+    Description: KDC Server EC2 instance type
+    Type: String
+    Default: t3.small
+    AllowedValues: [t2.nano, t2.micro, t2.small, t2.medium, t2.large, t2.xlarge, t2.2xlarge,
+     t3.nano, t3.micro, t3.small, t3.medium, t3.large, t3.xlarge, t3.2xlarge,
+      m4.large, m4.xlarge, m4.2xlarge, m4.4xlarge, m4.10xlarge,
+      m5.large, m5.xlarge, m5.2xlarge, m5.4xlarge,
+      c5.large, c5.xlarge, c5.2xlarge, c5.4xlarge, c5.9xlarge,
+      g3.8xlarge,
+      r5.large, r5.xlarge, r5.2xlarge, r5.4xlarge, r3.12xlarge,
+      i3.xlarge, i3.2xlarge, i3.4xlarge, i3.8xlarge,
+      d2.xlarge, d2.2xlarge, d2.4xlarge, d2.8xlarge]
+    ConstraintDescription: must be a valid EC2 instance type.
+  LatestAmiId:
+    Type:  'AWS::EC2::Image::Id'
+    Default: 'ami-011b3ccf1bd6db744'
+Resources:
+  VPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      Tags:
+        - Key: Application
+          Value: !Ref 'AWS::StackId'
+  Subnet:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.0.0/24
+      Tags:
+        - Key: Application
+          Value: !Ref 'AWS::StackId'
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: Application
+          Value: !Ref 'AWS::StackId'
+  AttachGateway:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+  RouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Application
+          Value: !Ref 'AWS::StackId'
+  Route:
+    Type: 'AWS::EC2::Route'
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  SubnetRouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref Subnet
+      RouteTableId: !Ref RouteTable
+  NetworkAcl:
+    Type: 'AWS::EC2::NetworkAcl'
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Application
+          Value: !Ref 'AWS::StackId'
+  InboundHTTPNetworkAclEntry:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAcl
+      RuleNumber: '100'
+      Protocol: '6'
+      RuleAction: allow
+      Egress: 'false'
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: '80'
+        To: '80'
+  InboundSSHNetworkAclEntry:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAcl
+      RuleNumber: '101'
+      Protocol: '6'
+      RuleAction: allow
+      Egress: 'false'
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: '22'
+        To: '22'
+  InboundResponsePortsNetworkAclEntry:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAcl
+      RuleNumber: '102'
+      Protocol: '6'
+      RuleAction: allow
+      Egress: 'false'
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: '1024'
+        To: '65535'
+  OutBoundHTTPNetworkAclEntry:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAcl
+      RuleNumber: '100'
+      Protocol: '6'
+      RuleAction: allow
+      Egress: 'true'
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: '80'
+        To: '80'
+  OutBoundHTTPSNetworkAclEntry:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAcl
+      RuleNumber: '101'
+      Protocol: '6'
+      RuleAction: allow
+      Egress: 'true'
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: '443'
+        To: '443'
+  OutBoundResponsePortsNetworkAclEntry:
+    Type: 'AWS::EC2::NetworkAclEntry'
+    Properties:
+      NetworkAclId: !Ref NetworkAcl
+      RuleNumber: '102'
+      Protocol: '6'
+      RuleAction: allow
+      Egress: 'true'
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: '1024'
+        To: '65535'
+  SubnetNetworkAclAssociation:
+    Type: 'AWS::EC2::SubnetNetworkAclAssociation'
+    Properties:
+      SubnetId: !Ref Subnet
+      NetworkAclId: !Ref NetworkAcl
+  IPAddress:
+    Type: 'AWS::EC2::EIP'
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref MASTERKDCSERVER1
+  InstanceSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: Enable SSH access via port 22
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: !Ref SSHLocation
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+  MASTERKDCSERVER1:
+    Type: AWS::EC2::Instance
+    DependsOn: AttachGateway
+    Properties:
+      InstanceType: !Ref 'InstanceType'
+      KeyName: !Ref 'KeyName'
+      IamInstanceProfile: !Ref PutS3BucketsInstanceProfile
+      ImageId: !Ref 'LatestAmiId'
+      Tags : [
+            {"Key" : "Name", "Value" : "kdc-master"}
+        ]
+      NetworkInterfaces:
+        - GroupSet:
+            - !Ref InstanceSecurityGroup
+          AssociatePublicIpAddress: 'true'
+          DeviceIndex: '0'
+          DeleteOnTermination: 'true'
+          SubnetId: !Ref Subnet
+          PrivateIpAddress: 10.0.0.8
+      UserData:
+        Fn::Base64:
+            !Sub |
+                #!/bin/bash
+                sudo yum -y install krb5-server krb5-libs krb5-workstation &&
+                sudo mkdir -p /var/log/kerberos
+                sudo bash -c 'echo "# Configuration snippets may be placed in this directory as well
+                includedir /etc/krb5.conf.d/
+                [logging]
+                default = FILE:/var/log/kerberos/krb5libs.log
+                kdc = FILE:/var/log/kerberos/krb5kdc.log
+                admin_server = FILE:/var/log/kerberos/kadmind.log
+                [libdefaults]
+                default_realm = EC2.INTERNAL
+                dns_lookup_realm = false
+                dns_lookup_kdc = false
+                rdns = false ticket_lifetime = 24h
+                forwardable = true
+                udp_preference_limit = 1000000
+                default_tkt_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96 des3-cbc-sh
+                default_tgs_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96 des3-cbc-sh
+                permitted_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96 des3-cbc-sh
+                [realms]
+                EC2.INTERNAL = {
+                kdc = $(hostname -f):88
+                admin_server = $(hostname -f):749
+                default_domain = $(hostname -f)
+                }
+                EXAMPLE.COM = {
+                kdc = example.com
+                admin_server = example.com
+                default_domain = example.com
+                }
+                [domain_realm]
+                .us-east-1.compute.internal = EC2.INTERNAL
+                us-east-1.compute.internal = EC2.INTERNAL
+                .example.com = EXAMPLE.COM
+                example.com = EXAMPLE.COM" > /etc/krb5.conf
+                echo "default_realm = EC2.INTERNAL
+                [kdcdefaults]
+                kdc_ports = 88
+                kdc_tcp_ports = 88
+                [realms]
+                EC2.INTERNAL = {
+                kdc_ports = 88
+                acl_file = /var/kerberos/krb5kdc/kadm5.acl
+                dict_file = /usr/share/dict/words
+                admin_keytab = /etc/kadm5.keytab
+                database_name = /var/kerberos/krb5kdc/principal
+                key_stash_file = /var/kerberos/krb5kdc/stash
+                max_life = 10h 0m 0s
+                max_renewable_life = 7d 0h 0m 0s
+                master_key_type = des3-hmac-sha1
+                supported_enctypes = aes256-cts-hmac-sha1-96:normal aes128-cts-hmac-sha1-96:normal
+                " > /var/kerberos/krb5kdc/kdc.conf
+                echo "
+                set -x
+                EXTERNAL_KDC_URL=curl 'https://ipinfo.io/ip'
+                sudo sed -i 's/include kerberos::kdc::admin_server//' /var/aws/emr/bigtop-deploy/pupp
+                sudo sed -i 's/include kerberos::kdc/include kerberos::client/' /var/aws/emr/bigtop-d
+                sudo sed -i "/kdc = <%= @kdc_server %>/a \ \ \ \ \ \ \ \ kdc = $(hostname -f):88" /v
+                sudo sed -i "/permitted_enctypes/a \ \ \ \ \ kdc_timeout = 900"  /var/aws/emr/bigtop-ds" > /home/ec2-user/external_kdc_server.sh'
+                sudo kdb5_util create -s -P secret
+                sudo kadmin.local -q "cpw -pw secret kadmin/admin"
+                sudo kadmin.local -q "cpw -pw secret kadmin/$(hostname -f)"
+                sudo kadmin.local -q "add_principal -pw secret krbtgt/EC2.INTERNAL@EXAMPLE.COM"
+                sudo kadmin.local -q "add_principal -pw secret krbtgt/EXAMPLE.COM@EC2.INTERNAL"
+                sudo bash -c 'echo "*/admin *" > /var/kerberos/krb5kdc/kadm5.acl'
+                sudo service krb5kdc start && sudo chkconfig krb5kdc on
+                sudo service kadmin start && sudo chkconfig kadmin on
+                sudo kadmin.local -q "add_principal -randkey host/$(hostname -f)"
+                sudo kadmin.local -q "ktadd host/$(hostname -f)"
+                sudo kdb5_util dump /var/kerberos/krb5kdc/slave_datatrans
+                sudo kprop ${ReplicaServerPrivateIpAddress}
+                sudo bash -c 'echo "#!/bin/sh
+                kdclist = "${ReplicaServerPrivateIpAddress}"
+                /usr/sbin/kdb5_util dump /var/kerberos/krb5kdc/slave_datatrans for kdc in $kdclist
+                do
+                /usr/sbin/kprop $kdc done " > /root/propagate_kdc_replica.sh'
+                sudo chmod +x /root/propagate_kdc_replica.sh
+                sudo bash -c  'echo "*/2 * * * *  /root/propagate_kdc_replica.sh" > /var/spool/cron/root' &&
+                sudo curl -O 'https://bootstrap.pypa.io/get-pip.py'
+                sudo python get-pip.py
+                export PATH=~/.local/bin:$PATH
+                source ~/.bash_profile
+                sudo pip install awscli --upgrade
+                sudo aws s3 cp external_kdc_server.sh s3://${SourceBucket}/external_kdc_server.sh
+  REPLICAKDCSERVER1:
+    Type: AWS::EC2::Instance
+    DependsOn: AttachGateway
+    Properties:
+      InstanceType: !Ref 'InstanceType'
+      KeyName: !Ref 'KeyName'
+      ImageId: !Ref 'LatestAmiId'
+      Tags : [
+              {"Key" : "Name", "Value" : "kdc-replica"}
+          ]
+      NetworkInterfaces:
+        - GroupSet:
+            - !Ref InstanceSecurityGroup
+          AssociatePublicIpAddress: 'true'
+          DeviceIndex: '0'
+          DeleteOnTermination: 'true'
+          SubnetId: !Ref Subnet
+          PrivateIpAddress: 10.0.0.9
+      UserData:
+        Fn::Base64:
+            !Sub |
+                #!/bin/bash
+                sudo yum -y install krb5-server krb5-libs krb5-workstation
+                sudo mkdir -p /var/log/kerberos
+                sudo bash -c 'echo "# Configuration snippets may be placed in this directory as well
+                includedir /etc/krb5.conf.d/
+                [logging]
+                default = FILE:/var/log/kerberos/krb5libs.log
+                kdc = FILE:/var/log/kerberos/krb5kdc.log
+                admin_server = FILE:/var/log/kerberos/kadmind.log
+                [libdefaults]
+                default_realm = EC2.INTERNAL
+                dns_lookup_realm = false
+                dns_lookup_kdc = false
+                rdns = false ticket_lifetime = 24h
+                forwardable = true
+                udp_preference_limit = 1000000
+                default_tkt_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96 des3-cbc-sh
+                default_tgs_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96 des3-cbc-sh
+                permitted_enctypes = aes256-cts-hmac-sha1-96 aes128-cts-hmac-sha1-96 des3-cbc-sh
+                [realms]
+                EC2.INTERNAL = {
+                kdc = ${MasterServerPrivateIpAddress}:88
+                admin_server = ${MasterServerPrivateIpAddress}:749
+                default_domain = ${MasterServerPrivateIpAddress}
+                }
+                EXAMPLE.COM = {
+                kdc = example.com
+                admin_server = example.com
+                default_domain = example.com
+                }
+                [domain_realm]
+                .us-east-1.compute.internal = EC2.INTERNAL
+                us-east-1.compute.internal = EC2.INTERNAL
+                .example.com = EXAMPLE.COM
+                example.com = EXAMPLE.COM" > /etc/krb5.conf' &&
+                sudo bash -c 'echo "default_realm = EC2.INTERNAL
+                [kdcdefaults]
+                kdc_ports = 88
+                kdc_tcp_ports = 88
+                [realms]
+                EC2.INTERNAL = {
+                kdc_ports = 88
+                acl_file = /var/kerberos/krb5kdc/kadm5.acl
+                dict_file = /usr/share/dict/words
+                admin_keytab = /etc/kadm5.keytab
+                database_name = /var/kerberos/krb5kdc/principal
+                key_stash_file = /var/kerberos/krb5kdc/stash
+                max_life = 10h 0m 0s
+                max_renewable_life = 7d 0h 0m 0s
+                master_key_type = des3-hmac-sha1
+                supported_enctypes = aes256-cts-hmac-sha1-96:normal aes128-cts-hmac-sha1-96:normal
+                " > /var/kerberos/krb5kdc/kdc.conf'
+                sudo kadmin -p kadmin/admin -w secret -q "add_principal -randkey host/$(hostname -f)"
+                sudo kadmin -p kadmin/admin -w secret -q "ktadd host/$(hostname -f)"
+                sudo bash -c "echo host/${MasterServerPrivateIpAddress}@EC2.INTERNAL > /var/kerberos/krb5kdc/kpropd.acl"
+                sudo service krb5kdc start && sudo chkconfig krb5kdc on
+                sudo service kprop start && sudo chkconfig kprop on
+  PutS3BucketsInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref PutS3BucketsRole
+  PutS3BucketsPolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      PolicyName: PutS3BucketsPolicy
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Action:
+              - 's3:PutObject*'
+            Resource: '*'
+      Roles:
+        - !Ref PutS3BucketsRole
+  PutS3BucketsRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+Outputs:
+  MASTERKDCSERVER1:
+    Description: InstanceId of the newly created KDC Master Node
+    Value: !Ref 'MASTERKDCSERVER1'
+  REPLICAKDCSERVER1:
+    Description: InstanceId of the newly created KDC Replica Node
+    Value: !Ref 'REPLICAKDCSERVER1'
+  PublicDNSMaster:
+    Description: Public DNSName of the newly created KDC Master Node
+    Value: !GetAtt [MASTERKDCSERVER1, PublicDnsName]
+  PublicDNSReplica:
+    Description: Public DNSName of the newly created KDC Replica Node
+    Value: !GetAtt [REPLICAKDCSERVER1, PublicDnsName]
+  PrivateDnsNameMaster:
+    Description: Private DNSName of the Master Server
+    Value: !GetAtt [MASTERKDCSERVER1, PrivateDnsName]
+  PrivateDnsNameReplica:
+    Description: Private DNSName of the Replica Server
+    Value: !GetAtt [REPLICAKDCSERVER1, PrivateDnsName]
