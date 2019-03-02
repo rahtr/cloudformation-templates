@@ -271,13 +271,15 @@ Resources:
                 master_key_type = des3-hmac-sha1
                 supported_enctypes = aes256-cts-hmac-sha1-96:normal aes128-cts-hmac-sha1-96:normal
                 " > /var/kerberos/krb5kdc/kdc.conf
-                echo "
+                echo "#!/bin/bash
                 set -x
-                EXTERNAL_KDC_URL=curl 'https://ipinfo.io/ip'
+                EXTERNAL_KDC_URL=curl https://ipinfo.io/ip
                 sudo sed -i 's/include kerberos::kdc::admin_server//' /var/aws/emr/bigtop-deploy/pupp
                 sudo sed -i 's/include kerberos::kdc/include kerberos::client/' /var/aws/emr/bigtop-d
+                sudo sed -i "s/kerberos::site::kdc_server.*/kerberos::site::kdc_server: \"$EXTERNAL_KD
                 sudo sed -i "/kdc = <%= @kdc_server %>/a \ \ \ \ \ \ \ \ kdc = $(hostname -f):88" /v
-                sudo sed -i "/permitted_enctypes/a \ \ \ \ \ kdc_timeout = 900"  /var/aws/emr/bigtop-ds" > /home/ec2-user/external_kdc_server.sh'
+                sudo sed -i "/permitted_enctypes/a \ \ \ \ \ kdc_timeout = 900"  /var/aws/emr/bigtop-ds
+                " > $home/external_kdc_server.sh'
                 sudo kdb5_util create -s -P secret
                 sudo kadmin.local -q "cpw -pw secret kadmin/admin"
                 sudo kadmin.local -q "cpw -pw secret kadmin/$(hostname -f)"
@@ -302,7 +304,7 @@ Resources:
                 export PATH=~/.local/bin:$PATH
                 source ~/.bash_profile
                 sudo pip install awscli --upgrade
-                sudo aws s3 cp external_kdc_server.sh s3://${SourceBucket}/external_kdc_server.sh
+                sudo aws s3 cp $home/external_kdc_server.sh s3://${SourceBucket}/external_kdc_server.sh
   REPLICAKDCSERVER1:
     Type: AWS::EC2::Instance
     DependsOn: AttachGateway
